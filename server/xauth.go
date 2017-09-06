@@ -1,15 +1,13 @@
-package auth
+package server
 
 import (
 	"github.com/juju/errors"
 	"github.com/ngaut/log"
 	"github.com/pingcap/tipb/go-mysqlx"
 	"github.com/pingcap/tipb/go-mysqlx/Session"
-	"github.com/pingcap/tidb/xprotocol/xpacketio"
 	"github.com/pingcap/tidb/xprotocol/notice"
 	"github.com/pingcap/tidb/xprotocol/util"
 	"github.com/pingcap/tidb/mysql"
-	"github.com/pingcap/tidb/driver"
 )
 
 type sessionState int32
@@ -24,12 +22,11 @@ const (
 )
 
 type XAuth struct {
-	ctx               driver.QueryCtx
-	authHandler       AuthenticationHandler
+	xcc *mysqlXClientConn
+	authHandler AuthenticationHandler
+
 	mState            sessionState
 	mStateBeforeClose sessionState
-	sessionId         uint32
-	pkt               *xpacketio.XPacketIO
 }
 
 func (xa *XAuth) handleMessage(msgType Mysqlx.ClientMessages_Type, payload []byte) error {
@@ -46,12 +43,12 @@ func (xa *XAuth) HandleReadyMessage(msgType Mysqlx.ClientMessages_Type, payload 
 	switch msgType {
 	case Mysqlx.ClientMessages_SESS_CLOSE:
 		content := "bye!"
-		notice.SendOK(xa.pkt, &content)
+		notice.SendOK(xa.xcc.pkt, &content)
 		xa.onClose(false)
 		return nil
 	case Mysqlx.ClientMessages_CON_CLOSE:
 		content := "bye!"
-		notice.SendOK(xa.pkt, &content)
+		notice.SendOK(xa.xcc.pkt, &content)
 		xa.onClose(false)
 		return nil
 	case Mysqlx.ClientMessages_SESS_RESET:
@@ -71,16 +68,16 @@ func (xa *XAuth) HandleAuthMessage(msgType Mysqlx.ClientMessages_Type, payload [
 			log.Errorf("Can't Unmarshal message %s, err %s", msgType.String(), err.Error())
 			errCode := util.ErXBadMessage
 			content := "Invalid message"
-			notice.SendInitError(xa.pkt, &errCode, &content)
+			notice.SendInitError(xa.xcc.pkt, &errCode, &content)
 			return err
 		}
 
-		xa.authHandler = createAuthHandler(*data.MechName, xa.pkt)
+		xa.authHandler = xa.createAuthHandler(*data.MechName)
 		if xa.authHandler == nil {
 			log.Errorf("Can't create XAuth handler with mech name %s", *data.MechName)
 			errCode := uint16(mysql.ErrNotSupportedAuthMode)
 			content := "Invalid authentication method " + *data.MechName
-			notice.SendInitError(xa.pkt, &errCode, &content)
+			notice.SendInitError(xa.xcc.pkt, &errCode, &content)
 			xa.stopAuth()
 			return errors.New("invalid authentication method")
 		}
@@ -91,7 +88,7 @@ func (xa *XAuth) HandleAuthMessage(msgType Mysqlx.ClientMessages_Type, payload [
 		if err := data.Unmarshal(payload); err != nil {
 			errCode := util.ErXBadMessage
 			content := "Invalid message"
-			notice.SendInitError(xa.pkt, &errCode, &content)
+			notice.SendInitError(xa.xcc.pkt, &errCode, &content)
 			return err
 		}
 
@@ -99,7 +96,7 @@ func (xa *XAuth) HandleAuthMessage(msgType Mysqlx.ClientMessages_Type, payload [
 	default:
 		errCode := util.ErXBadMessage
 		content := "Invalid message"
-		notice.SendInitError(xa.pkt, &errCode, &content)
+		notice.SendInitError(xa.xcc.pkt, &errCode, &content)
 		xa.stopAuth()
 		return errors.New("invalid message")
 	}
@@ -117,7 +114,7 @@ func (xa *XAuth) HandleAuthMessage(msgType Mysqlx.ClientMessages_Type, payload [
 }
 
 func (xa *XAuth) onAuthSuccess(r *Response) {
-	notice.SendClientId(xa.pkt, xa.sessionId)
+	notice.SendClientId(xa.xcc.pkt, xa.xcc.connectionID)
 	xa.stopAuth()
 	xa.mState = ready
 	xa.SendAuthOk(&r.data)
@@ -126,7 +123,7 @@ func (xa *XAuth) onAuthSuccess(r *Response) {
 
 func (xa *XAuth) onAuthFailure(r *Response) {
 	errCode := uint16(mysql.ErrAccessDenied)
-	notice.SendInitError(xa.pkt, &errCode, &r.data)
+	notice.SendInitError(xa.xcc.pkt, &errCode, &r.data)
 	xa.stopAuth()
 }
 
@@ -157,7 +154,7 @@ func (xa *XAuth) SendAuthOk(value *string) error {
 		return err
 	}
 
-	return xa.pkt.WritePacket(int32(Mysqlx.ServerMessages_SESS_AUTHENTICATE_OK), data)
+	return xa.xcc.pkt.WritePacket(int32(Mysqlx.ServerMessages_SESS_AUTHENTICATE_OK), data)
 }
 
 func (xa *XAuth) SendAuthContinue(value *string) error {
@@ -170,15 +167,6 @@ func (xa *XAuth) SendAuthContinue(value *string) error {
 		return err
 	}
 
-	return xa.pkt.WritePacket(int32(Mysqlx.ServerMessages_SESS_AUTHENTICATE_CONTINUE), data)
+	return xa.xcc.pkt.WritePacket(int32(Mysqlx.ServerMessages_SESS_AUTHENTICATE_CONTINUE), data)
 }
 
-func CreateAuth(id uint32, ctx driver.QueryCtx, pkt *xpacketio.XPacketIO) *XAuth {
-	return &XAuth{
-		ctx:               ctx,
-		mState:            authenticating,
-		mStateBeforeClose: authenticating,
-		sessionId:         id,
-		pkt:               pkt,
-	}
-}

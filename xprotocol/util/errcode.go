@@ -58,6 +58,12 @@ const (
 	ErXMysqlxAccountMissingPermissions = 5167
 )
 
+var (
+	ErrXBadMessage = ErrorMessage(ErXBadMessage, "Invalid message")
+	ErrXNoSuchUser = ErrorMessage(mysql.ErrNoSuchUser, "Invalid user or password")
+	ErrXAccessDenied = ErrorMessage(mysql.ErrAccessDenied, "Invalid user or password")
+)
+
 // ErrorMessage returns Mysqlx Error.
 func ErrorMessage(errcode uint16, msg string) *Mysqlx.Error {
 	code := uint32(errcode)
