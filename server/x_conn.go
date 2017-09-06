@@ -157,9 +157,9 @@ func (xcc *mysqlXClientConn) handshakeSession() error {
 	if err != nil {
 		return errors.Trace(err)
 	}
-	xcc.xsession = xprotocol.CreateXSession(&xcc.alloc, xcc.connectionID, ctx, xcc.pkt)
+	xcc.xsession = xprotocol.CreateXSession(&xcc.alloc, xcc.connectionID, ctx, xcc.pkt, xcc.server.skipAuth())
 
-	if err := xcc.xsession.HandleMessage(tp, msg); err != nil {
+	if err := xcc.xsession.HandleMessage(Mysqlx.ClientMessages_Type(tp), msg); err != nil {
 		return errors.New("error happened when handle auth start.")
 	}
 

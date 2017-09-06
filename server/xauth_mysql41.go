@@ -73,7 +73,7 @@ func (spa *saslMysql41Auth) handleContinue(data []byte) *Response {
 		if err1 != nil {
 			err = xutil.ErrXNoSuchUser
 		}
-		xcc.xsession = xprotocol.CreateXSession(xcc.connectionID, ctx, xcc.pkt, xcc.server.skipAuth())
+		xcc.xsession = xprotocol.CreateXSession(&xcc.alloc, xcc.connectionID, ctx, xcc.pkt, xcc.server.skipAuth())
 
 		if !spa.xauth.xcc.server.skipAuth() {
 			// Do Auth

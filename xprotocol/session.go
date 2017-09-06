@@ -13,7 +13,7 @@ type XSession struct {
 	xsql *sql.XSql
 }
 
-func CreateXSession(alloc *arena.Allocator, id uint32, ctx driver.QueryCtx, pkt *xpacketio.XPacketIO) *XSession {
+func CreateXSession(alloc *arena.Allocator, id uint32, ctx driver.QueryCtx, pkt *xpacketio.XPacketIO, skipAuth bool) *XSession {
 	return &XSession{
 		xsql: sql.CreateContext(alloc, ctx, pkt),
 	}
