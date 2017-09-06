@@ -24,10 +24,9 @@ import (
 	"github.com/pingcap/tidb/xprotocol/xpacketio"
 	"github.com/pingcap/tidb/util/arena"
 	"github.com/pingcap/tipb/go-mysqlx"
-	"github.com/pingcap/tipb/go-mysqlx/Sql"
 	"github.com/pingcap/tidb/xprotocol/capability"
-	"github.com/pingcap/tidb/xprotocol/auth"
 	"github.com/pingcap/tidb/driver"
+	"github.com/pingcap/tidb/xprotocol"
 )
 
 // mysqlXClientConn represents a connection between server and client,
@@ -35,7 +34,7 @@ import (
 type mysqlXClientConn struct {
 	pkt          *xpacketio.XPacketIO // a helper to read and write data in packet format.
 	conn         net.Conn
-	auth         *auth.XAuth
+	xsession     *xprotocol.XSession
 	server       *Server           // a reference of server instance.
 	capability   uint32            // client capability affects the way server handles client request.
 	connectionID uint32            // atomically allocated by a global variable, unique in process scope.
@@ -146,19 +145,20 @@ func (xcc *mysqlXClientConn) handshakeConnection() error {
 }
 
 func (xcc *mysqlXClientConn) handshakeSession() error {
-	xcc.auth = auth.CreateAuth(xcc.id(), xcc.ctx, xcc.pkt)
 	tp, msg, err := xcc.pkt.ReadPacket()
 	if err != nil {
 		return errors.Trace(err)
 	}
 
 	// Open session and do auth
-	xcc.ctx, err = xcc.server.driver.OpenCtx(uint64(xcc.connectionID), xcc.capability, uint8(xcc.collation), xcc.dbname)
+	var ctx driver.QueryCtx
+	ctx, err = xcc.server.driver.OpenCtx(uint64(xcc.connectionID), xcc.capability, uint8(xcc.collation), xcc.dbname)
 	if err != nil {
 		return errors.Trace(err)
 	}
+	xcc.xsession = xprotocol.CreateXSession(xcc.connectionID, ctx, xcc.pkt)
 
-	if err := xcc.auth.HandleAuthMessage(Mysqlx.ClientMessages_Type(tp), msg); err != nil {
+	if err := xcc.xsession.HandleMessage(tp, msg); err != nil {
 		return errors.New("error happened when handle auth start.")
 	}
 
@@ -167,7 +167,7 @@ func (xcc *mysqlXClientConn) handshakeSession() error {
 		return errors.Trace(err)
 	}
 
-	if err := xcc.auth.HandleAuthMessage(Mysqlx.ClientMessages_Type(tp), msg); err != nil {
+	if err := xcc.xsession.HandleMessage(tp, msg); err != nil {
 		return errors.New("error happened when handle auth continue.")
 	}
 
@@ -187,21 +187,7 @@ func (xcc *mysqlXClientConn) handshake() error {
 }
 
 func (xcc *mysqlXClientConn) dispatch(tp int32, payload []byte) error {
-	msgType := Mysqlx.ClientMessages_Type(tp)
-	switch msgType {
-	case Mysqlx.ClientMessages_SESS_CLOSE, Mysqlx.ClientMessages_CON_CLOSE, Mysqlx.ClientMessages_SESS_RESET:
-		if err := xcc.auth.HandleReadyMessage(msgType, payload); err != nil {
-			return err
-		}
-	case Mysqlx.ClientMessages_SQL_STMT_EXECUTE:
-		if err := xcc.DealSQLStmtExecute(msgType, payload); err != nil {
-			return err
-		}
-	default:
-		return errors.Errorf("unknown message type %d", tp)
-	}
-
-	return nil
+	return xcc.xsession.HandleMessage(tp, payload)
 }
 
 func (xcc *mysqlXClientConn) flush() error {
@@ -228,23 +214,4 @@ func (xcc *mysqlXClientConn) id() uint32 {
 func (xcc *mysqlXClientConn) showProcess() util.ProcessInfo {
 	//return xcc.ctx.ShowProcess()
 	return util.ProcessInfo{}
-}
-
-
-func (xcc *mysqlXClientConn) DealSQLStmtExecute (msgType Mysqlx.ClientMessages_Type, payload []byte) error {
-	var msg Mysqlx_Sql.StmtExecute
-	if err := msg.Unmarshal(payload); err != nil {
-		return err
-	}
-
-	switch msg.GetNamespace() {
-	case "xplugin":
-	case "mysqlx":
-	case "sql", "":
-		sql := string(msg.GetStmt())
-		xcc.ctx.Execute(sql)
-	default:
-		return errors.New("unknown namespace")
-	}
-	return nil
 }
