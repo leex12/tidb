@@ -34,6 +34,7 @@ import (
 type mysqlXClientConn struct {
 	pkt          *xpacketio.XPacketIO // a helper to read and write data in packet format.
 	conn         net.Conn
+	xauth        XAuth
 	xsession     *xprotocol.XSession
 	server       *Server           // a reference of server instance.
 	capability   uint32            // client capability affects the way server handles client request.
@@ -91,9 +92,9 @@ func (xcc *mysqlXClientConn) Close() error {
 	xcc.server.rwlock.Unlock()
 	connGauge.Set(float64(connections))
 	xcc.conn.Close()
-	//if xcc.ctx != nil {
-	//	return xcc.ctx.Close()
-	//}
+	if xcc.ctx != nil {
+		return xcc.ctx.Close()
+	}
 	return nil
 }
 
@@ -150,15 +151,7 @@ func (xcc *mysqlXClientConn) handshakeSession() error {
 		return errors.Trace(err)
 	}
 
-	// Open session and do auth
-	var ctx driver.QueryCtx
-	ctx, err = xcc.server.driver.OpenCtx(uint64(xcc.connectionID), xcc.capability, uint8(xcc.collation), xcc.dbname)
-	if err != nil {
-		return errors.Trace(err)
-	}
-	xcc.xsession = xprotocol.CreateXSession(xcc.connectionID, ctx, xcc.pkt)
-
-	if err := xcc.xsession.HandleMessage(tp, msg); err != nil {
+	if err := xcc.xauth.handleMessage(Mysqlx.ClientMessages_Type(tp), msg); err != nil {
 		return errors.New("error happened when handle auth start.")
 	}
 
@@ -167,7 +160,7 @@ func (xcc *mysqlXClientConn) handshakeSession() error {
 		return errors.Trace(err)
 	}
 
-	if err := xcc.xsession.HandleMessage(tp, msg); err != nil {
+	if err := xcc.xauth.handleMessage(Mysqlx.ClientMessages_Type(tp), msg); err != nil {
 		return errors.New("error happened when handle auth continue.")
 	}
 
@@ -183,11 +176,28 @@ func (xcc *mysqlXClientConn) handshake() error {
 		return err
 	}
 
+	if xcc.dbname != "" {
+		if err := xcc.useDB(xcc.dbname); err != nil {
+			return errors.Trace(err)
+		}
+	}
+	xcc.ctx.SetSessionManager(xcc.server)
+
 	return nil
 }
 
 func (xcc *mysqlXClientConn) dispatch(tp int32, payload []byte) error {
-	return xcc.xsession.HandleMessage(tp, payload)
+	msgType := Mysqlx.ClientMessages_Type(tp)
+	switch msgType {
+	case Mysqlx.ClientMessages_SESS_CLOSE, Mysqlx.ClientMessages_CON_CLOSE, Mysqlx.ClientMessages_SESS_RESET:
+		if err := xcc.xauth.HandleReadyMessage(msgType, payload); err != nil {
+			return err
+		}
+	default:
+		return xcc.xsession.HandleMessage(msgType, payload)
+	}
+
+	return nil
 }
 
 func (xcc *mysqlXClientConn) flush() error {
@@ -214,4 +224,23 @@ func (xcc *mysqlXClientConn) id() uint32 {
 func (xcc *mysqlXClientConn) showProcess() util.ProcessInfo {
 	//return xcc.ctx.ShowProcess()
 	return util.ProcessInfo{}
+}
+
+func (xcc *mysqlXClientConn) useDB(db string) (err error) {
+	// if input is "use `SELECT`", mysql client just send "SELECT"
+	// so we add `` around db.
+	_, err = xcc.ctx.Execute("use `" + db + "`")
+	if err != nil {
+		return errors.Trace(err)
+	}
+	xcc.dbname = db
+	return
+}
+
+func (xcc *mysqlXClientConn) CreateAuth(id uint32) *XAuth {
+	return &XAuth{
+		xcc:               xcc,
+		mState:            authenticating,
+		mStateBeforeClose: authenticating,
+	}
 }
